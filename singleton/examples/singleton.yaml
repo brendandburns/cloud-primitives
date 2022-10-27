@@ -1,0 +1,7 @@
+apiVersion: metaparticle.io/v1beta1
+kind: singleton
+metadata:
+  namespace: default
+  name: test
+spec:
+  image: nginx
