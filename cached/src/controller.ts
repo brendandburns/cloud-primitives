@@ -1,4 +1,4 @@
-import { AppsV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, V1Deployment, V1DeploymentList } from '@kubernetes/client-node'
+import { AppsV1Api, CoreV1Api, CustomObjectsApi, KubeConfig, KubernetesListObject, KubernetesObject, V1Deployment, V1DeploymentList, V1Service, V1ServiceList, V1Status } from '@kubernetes/client-node'
 import { Cached, CachedList } from './cached.js';
 
 export class CachedController {
@@ -24,12 +24,49 @@ export class CachedController {
         const list = res.body as CachedList;
     
         const deployments = (await this.appsApi.listNamespacedDeployment(namespace)).body;
+        const services = (await this.coreApi.listNamespacedService(namespace)).body;
+        // TODO: this is O(n^2) but it could be O(n) via a hashtable
         for (const cached of list.items) {
             await this.reconcileDeployments(deployments, cached);
+            await this.reconcileServices(services, cached);
         }
         await this.maybeDeleteDeployments(deployments, list);
+        await this.maybeDeleteServices(services, list);
+    }
+
+    async updateService(c: Cached, s: V1Service): Promise<V1Service> {
+        return s;
     }
     
+    async createService(c: Cached): Promise<V1Service> {
+        const label = `${c.metadata.name}-cached`;
+        const s: V1Service = {
+            metadata: {
+                namespace: c.metadata.namespace,
+                name: c.metadata.name,
+                labels: {
+                    'cached.metaparticle.io': 'true'
+                }
+            },
+            spec: {
+                selector: {
+                    app: label
+                },
+                ports: [
+                    {
+                        name: 'port',
+                        port: 8080,
+                        protocol: 'TCP',
+                        targetPort: 8080
+                    }   
+                ]
+            }
+        }
+        const res = await this.coreApi.createNamespacedService(c.metadata.namespace, s);
+        console.log(`Created service for cached ${c.metadata.name}`);
+        return res.body;
+    }
+
     async updateDeployment(s: Cached, d: V1Deployment): Promise<V1Deployment> {
         return d;
     }
@@ -81,33 +118,58 @@ export class CachedController {
     }
     
     async reconcileDeployments(deployments: V1DeploymentList, cache: Cached): Promise<V1DeploymentList> {
+        return await this.reconcileList(deployments, cache, this.updateDeployment.bind(this), this.createDeployment.bind(this));
+    }
+
+    async reconcileServices(services: V1ServiceList, cache: Cached): Promise<V1ServiceList> {
+        return await this.reconcileList(services, cache, this.updateService.bind(this), this.createService.bind(this));
+    }
+
+    async reconcileList<T extends KubernetesObject>(
+        list: KubernetesListObject<T>, cache: Cached,
+        update: (cache: Cached, obj: T) => Promise<T>,
+        create: (cache: Cached) => Promise<T>): Promise<KubernetesListObject<T>> {
         var found = false;
-        for (const deployment of deployments.items) {
-            if (deployment.metadata.name === cache.metadata.name) {
+        for (const obj of list.items) {
+            if (obj.metadata.name === cache.metadata.name) {
                 found = true;
-                await this.updateDeployment(cache, deployment);
+                await update(cache, obj);
             }
         }
         if (!found) {
-            await this.createDeployment(cache);
+            await create(cache);
         }
-        return deployments
+        return list;
     }
     
     async maybeDeleteDeployments(deployments: V1DeploymentList, cached: CachedList): Promise<void> {
-        for (const deployment of deployments.items) {
-            if (!deployment.metadata.labels || deployment.metadata.labels['cached.metaparticle.io'] !== 'true') {
+        await this.maybeDeleteList(deployments, cached, async (name: string, ns: string) => {
+            await this.appsApi.deleteNamespacedDeployment(name, ns);
+        });
+    }
+
+    async maybeDeleteServices(services: V1ServiceList, cached: CachedList): Promise<void> {
+        await this.maybeDeleteList(services, cached, async (name: string, ns: string) => {
+            await this.coreApi.deleteNamespacedService(name, ns);
+        });
+    }
+
+    async maybeDeleteList<T extends KubernetesObject>(
+        list: KubernetesListObject<T>, cached: CachedList,
+        del: (name: string, namespace: string) => Promise<void>): Promise<void> {
+        for (const obj of list.items) {
+            if (!obj.metadata.labels || obj.metadata.labels['cached.metaparticle.io'] !== 'true') {
                 continue;
             }
             var found: boolean = false;
             for (const cache of cached.items) {
-                if (cache.metadata.name === deployment.metadata.name) {
+                if (cache.metadata.name === obj.metadata.name) {
                     found = true;
                 }
             }
             if (!found) {
-                console.log(`Deleting deployment for non-existent cached ${deployment.metadata.name}`);
-                await this.appsApi.deleteNamespacedDeployment(deployment.metadata.name, deployment.metadata.namespace);
+                console.log(`Deleting object for non-existent cached ${obj.metadata.name}`);
+                await del(obj.metadata.name, obj.metadata.namespace)
             }
         }
     }    
