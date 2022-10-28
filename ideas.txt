@@ -1,0 +1,4 @@
+cached
+rate-limited
+sharded
+configured == always keep config map synchronized

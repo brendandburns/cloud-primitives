@@ -1,0 +1,7 @@
+apiVersion: metaparticle.io/v1beta1
+kind: cached
+metadata:
+  namespace: default
+  name: test
+spec:
+  service: test-service
